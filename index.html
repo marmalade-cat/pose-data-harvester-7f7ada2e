@@ -1,0 +1,155 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Pose Data Harvester — Prototype</title>
+  <style>
+    body{font-family:system-ui,Arial;max-width:900px;margin:20px auto;color:#202020}
+    textarea{width:100%;height:160px;font-family:monospace}
+    button{padding:8px 12px;margin-top:8px}
+    pre{background:#f6f6f8;padding:10px;border-radius:6px;overflow:auto}
+    .hit{background:#e8f7e8;border-left:4px solid #63b463;padding:6px}
+    .maybe{background:#fff8e1;border-left:4px solid #e1a800;padding:6px}
+  </style>
+</head>
+<body>
+  <h2>Pose Data Harvester — Prototype</h2>
+  <p>I live in a small museum and keep a notebook. This tool demonstrates how to find CSV/JSON pose datasets referenced by an article and to extract candidate structured data when files are missing.</p>
+
+  <label>Paste article HTML (or a saved page):</label>
+  <textarea id="html"></textarea>
+  <div>
+    <button id="analyze">Analyze</button>
+    <button id="example">Load Example</button>
+  </div>
+
+  <h3>Results</h3>
+  <div id="results"></div>
+
+  <script>
+    function findLinks(doc){
+      const links = Array.from(doc.querySelectorAll('a[href]')).map(a=>({href:a.getAttribute('href'),text:a.innerText||a.title||''}));
+      return links;
+    }
+
+    function findDownloads(links){
+      const candidates = [];
+      const patterns = [/\.csv(\?|$)/i,/\.json(\?|$)/i,/download/i,/supplementary/i,/supplemental/i,/data/i];
+      for(const l of links){
+        for(const p of patterns){
+          if(p.test(l.href) || p.test(l.text)){
+            candidates.push(l);
+            break;
+          }
+        }
+      }
+      return candidates;
+    }
+
+    function extractTableLike(doc){
+      const tables = Array.from(doc.querySelectorAll('table'));
+      const extracted = tables.map(t=>{
+        const rows = Array.from(t.querySelectorAll('tr')).map(r=>Array.from(r.querySelectorAll('th,td')).map(cell=>cell.innerText.trim()));
+        return {type:'table',rows};
+      });
+      return extracted;
+    }
+
+    function extractPoseCandidates(doc){
+      const text = doc.body ? doc.body.innerText : doc.documentElement.innerText;
+      const lines = text.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+      const candidates = [];
+      const jointPatterns = [/joint[s]?/i, /pose[s]?/i, /angle[s]?/i, /keypoint[s]?/i, /skeleton/i, /joint_angle/i];
+      for(const l of lines){
+        for(const p of jointPatterns){
+          if(p.test(l) && l.length<500){
+            candidates.push({snippet:l, confidence: p.source.includes('pose')?0.7:0.5});
+            break;
+          }
+        }
+      }
+      return candidates.slice(0,30);
+    }
+
+    function extractImageCaptions(doc){
+      const imgs = Array.from(doc.querySelectorAll('figure, img'));
+      const caps = imgs.map(el=>{
+        const figcap = el.querySelector ? el.querySelector('figcaption') : null;
+        const alt = el.getAttribute ? el.getAttribute('alt') : '';
+        const src = el.getAttribute ? el.getAttribute('src') : '';
+        return {src, caption: figcap? figcap.innerText.trim() : (alt||'') };
+      }).filter(x=>x.caption);
+      return caps;
+    }
+
+    function makeReport(foundFiles, tables, candidates, images, linksChecked){
+      const report = {summary: '',found_files:foundFiles, tables:tables.length, text_candidates:candidates.length, image_captions:images.length, links_checked: linksChecked.length};
+      report.summary = `Checked ${linksChecked.length} links. Found ${foundFiles.length} direct downloadable candidates (CSV/JSON). Extracted ${tables.length} html tables, ${candidates.length} text-based candidates, and ${images.length} image captions.`;
+      report.confidence = Math.min(0.95, 0.2 + foundFiles.length*0.25 + tables.length*0.15 + candidates.length*0.05 + images.length*0.05);
+      return report;
+    }
+
+    document.getElementById('example').addEventListener('click', ()=>{
+      const sample = `<html><body><h1>Example article</h1><p>This paper includes joint angles and pose keypoints. See Supplementary Data.</p><a href="/files/supplementary.csv">Supplementary Data (CSV)</a><figure><img src="fig1.png" alt="Skeleton keypoints overlaid on image"></figure><table><tr><th>joint</th><th>angle</th></tr><tr><td>knee</td><td>45</td></tr></table></body></html>`;
+      document.getElementById('html').value = sample;
+    });
+
+    document.getElementById('analyze').addEventListener('click', ()=>{
+      const raw = document.getElementById('html').value;
+      if(!raw){ alert('Paste HTML first.'); return; }
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(raw, 'text/html');
+      const links = findLinks(doc);
+      const downloads = findDownloads(links);
+      const tables = extractTableLike(doc);
+      const candidates = extractPoseCandidates(doc);
+      const images = extractImageCaptions(doc);
+      const report = makeReport(downloads, tables, candidates, images, links);
+
+      const out = document.getElementById('results');
+      out.innerHTML = '';
+
+      const h1 = document.createElement('div');
+      h1.innerHTML = `<strong>Report</strong><br>${report.summary}<br>Confidence score: ${ (report.confidence*100).toFixed(0)}%`;
+      out.appendChild(h1);
+
+      if(downloads.length){
+        const div = document.createElement('div'); div.className='hit';
+        div.innerHTML = `<strong>Direct download candidates (${downloads.length}):</strong><br>` + downloads.map(d=>`<div><code>${escapeHtml(d.href)}</code> — ${escapeHtml(d.text)}</div>`).join('');
+        out.appendChild(div);
+      } else {
+        const div = document.createElement('div'); div.className='maybe';
+        div.innerHTML = `<strong>No direct CSV/JSON links found.</strong>`;
+        out.appendChild(div);
+      }
+
+      if(tables.length){
+        const div = document.createElement('div'); div.innerHTML = `<strong>Extracted HTML tables (${tables.length})</strong>`;
+        tables.forEach((t,i)=>{ const pre=document.createElement('pre'); pre.textContent = tableToCSV(t.rows); div.appendChild(pre); });
+        out.appendChild(div);
+      }
+
+      if(candidates.length){
+        const div = document.createElement('div'); div.innerHTML = `<strong>Text snippets likely to mention pose/joints (${candidates.length})</strong>`;
+        candidates.forEach(c=>{ const p=document.createElement('div'); p.textContent = c.snippet; out.appendChild(p); });
+      }
+
+      if(images.length){
+        const div = document.createElement('div'); div.innerHTML = `<strong>Image captions (may contain pose/keypoint info)</strong>`;
+        images.forEach(img=>{ const p=document.createElement('div'); p.textContent = `${img.src} — ${img.caption}`; div.appendChild(p); });
+        out.appendChild(div);
+      }
+
+      const jsonout = document.createElement('pre');
+      const payload = {report, downloads, tables, candidates, images, links};
+      jsonout.textContent = JSON.stringify(payload, null, 2);
+      out.appendChild(document.createElement('hr'));
+      out.appendChild(document.createTextNode('Machine-readable output (JSON):'));
+      out.appendChild(jsonout);
+    });
+
+    function tableToCSV(rows){ return rows.map(r=>r.map(cell=>`"${cell.replace(/"/g,'""')}"`).join(',')).join('\n'); }
+    function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  </script>
+</body>
+</html>
